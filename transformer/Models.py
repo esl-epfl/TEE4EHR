@@ -1,7 +1,4 @@
-import time
 import math
-from re import sub
-# from selectors import EpollSelector
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,10 +7,7 @@ import torch.nn.functional as F
 import transformer.Constants as Constants
 from transformer.Layers import EncoderLayer
 
-from collections.abc import Sequence
-
-import Utils
-
+from transformer.Modules import  Predictor, CIF_sahp, MLP_state, CumulativeSetAttentionLayer
 
 def get_non_pad_mask(seq):
     """ Get the non-padding positions. """
@@ -53,834 +47,6 @@ def get_subsequent_mask(seq, diag_offset=1):
     subsequent_mask = subsequent_mask.unsqueeze(
         0).expand(sz_b, -1, -1)  # b x ls x ls
     return subsequent_mask
-
-
-class Encoder(nn.Module):
-    """ A encoder model with self attention mechanism. """
-
-    def __init__(
-            self,
-            n_marks,
-            d_type_emb,
-
-            time_enc,
-            d_time,
-
-            d_inner,
-            n_layers,
-            n_head,
-            d_k,
-            d_v,
-            dropout,
-
-            device,
-
-            diag_offset,
-            # reg=False,
-
-
-    ):
-        super().__init__()
-
-        self.diag_offset = diag_offset
-        self.n_marks = n_marks
-        self.d_type_emb = d_type_emb
-
-        self.time_enc = time_enc
-        self.d_time = d_time  # will be set to 0 later if 'sum'
-
-        self.d_inner = d_inner
-        self.n_layers = n_layers
-        self.n_head = n_head
-        self.d_k = d_k
-        self.d_v = d_v
-        self.dropout = dropout
-
-        # position vector, used for temporal encoding
-        if self.time_enc == 'sum':
-            self.position_vec = torch.tensor(
-                [math.pow(10000.0, 2.0 * (i // 2) / (self.d_type_emb))
-                 for i in range(self.d_type_emb)],
-                device=device)
-            self.d_time = 0
-
-        elif self.time_enc == 'concat':
-
-            self.position_vec = torch.tensor(
-                [math.pow(10000.0, 2.0 * (i // 2) / (self.d_time))
-                 for i in range(self.d_time)],
-
-                device=device)
-        elif self.time_enc == 'none':
-            self.d_time = 0
-
-        self.event_emb = nn.Linear(n_marks, d_type_emb, bias=True)
-        # nn.init.xavier_uniform_(self.event_emb.weight)
-
-        self.d_model = self.d_type_emb + self.d_time
-
-        # if self.reg:
-        #     self.A_reg = torch.nn.Parameter(torch.ones(num_types, num_types))
-
-        # TE_layer = nn.TransformerEncoderLayer(self.d_model, n_head, dim_feedforward=d_inner, dropout=dropout, layer_norm_eps=1e-05, batch_first=True, norm_first=False, device=None, dtype=None)
-
-        # self.layer_stack = nn.ModuleList([
-        #     TE_layer
-        #     for _ in range(n_layers)])
-
-        self.layer_stack = nn.ModuleList([
-            EncoderLayer(self.d_model, d_inner, n_head, d_k, d_v,
-                         dropout=dropout, normalize_before=False)
-            for _ in range(n_layers)])
-
-        # self.layer_stack = nn.ModuleList([nn.TransformerEncoderLayer(self.d_model, n_head, dim_feedforward=d_inner, dropout=dropout, activation=nn.ReLU(), batch_first=True, norm_first=False, device=None, dtype=None)
-        #                                   for _ in range(n_layers)])
-
-    def temporal_enc(self, time, non_pad_mask):
-        """
-        Input: batch*seq_len.
-        Output: batch*seq_len*d_mark.
-        """
-
-        # temp = torch.ones_like(time) * torch.arange(time.shape[1],device=time.device) # [B,L] * [L]=[B,L]
-        # result = temp.unsqueeze(-1) / self.position_vec
-
-        result = time.unsqueeze(-1) / self.position_vec
-
-        result[:, :, 0::2] = torch.sin(result[:, :, 0::2])
-        result[:, :, 1::2] = torch.cos(result[:, :, 1::2])
-        return result * non_pad_mask
-
-    def forward(self, event_type, event_time, non_pad_mask):
-        """ Encode event sequences via masked self-attention. """
-
-        # prepare attention masks
-        # slf_attn_mask is where we cannot look, i.e., the future and the padding
-        slf_attn_mask_subseq = get_subsequent_mask(
-            event_type, self.diag_offset)
-        slf_attn_mask_keypad = get_attn_key_pad_mask(
-            seq_k=event_type, seq_q=event_type)
-        slf_attn_mask_keypad = slf_attn_mask_keypad.type_as(
-            slf_attn_mask_subseq)
-        # [B,L,L] True are masked
-        slf_attn_mask = (slf_attn_mask_keypad + slf_attn_mask_subseq).gt(0)
-
-        # if len(event_type.shape)==3:
-        #     # E_oh = nn.functional.one_hot(event_type.sum(-1).bool().long(), num_classes=self.num_types+1)[:,:,1:].type(torch.float)    # [B,L,num_classes]
-        #     E_oh = event_type
-        # else:
-        #     E_oh = nn.functional.one_hot(event_type, num_classes=self.num_types+1)[:,:,1:].type(torch.float)
-
-        # [B,L,L] <- [B,L,num_classes] * [num_classes,num_classes] * [B,num_classes,L]
-        # mask2 = torch.matmul( torch.matmul(E_oh,A_reg) , E_oh.transpose(1,2))   # 1 INDICATES a connection
-        # # mask2 = mask2 * (1 - torch.triu(mask2, diagonal=1))
-        # mask2 = (torch.triu(mask2, diagonal=1))
-
-        # slf_attn_mask = slf_attn_mask #+ (mask2) # [B,L,L] True are masked (do not attend)
-
-        # ### Event type embedding
-        if len(event_type.shape) == 3:
-            # E_oh = nn.functional.one_hot(event_type.sum(-1).bool().long(), num_classes=self.num_types+1)[:,:,1:].type(torch.float)    # [B,L,num_classes]
-            event_type_1hot = event_type.type(torch.float)
-        else:
-            event_type_1hot = nn.functional.one_hot(
-                event_type, num_classes=self.n_marks+1)[:, :, 1:].type(torch.float)
-
-        x = self.event_emb(event_type_1hot)
-
-        # ### Event time encoding
-        time_enc = self.temporal_enc(
-            event_time, non_pad_mask)  # [B, L, d_model]
-
-        # ### combining
-        if self.time_enc == 'sum':
-            x += time_enc  # [B,L,d_model]
-        elif self.time_enc == 'concat':
-            x = torch.cat((x, time_enc), -1)  # [B,L,d_model]
-        elif self.time_enc == 'none':
-            pass
-
-        for enc_layer in self.layer_stack:
-            # x += tem_enc
-
-            x, self_attn = enc_layer(
-                x,
-                non_pad_mask=non_pad_mask,
-                slf_attn_mask=slf_attn_mask)
-
-            # x = enc_layer(
-            #     x,
-            #     # [L,L] True means: do not attend
-            #     src_mask=slf_attn_mask_subseq[0].bool(),
-            #     src_key_padding_mask=(~non_pad_mask.bool()).squeeze(-1))  # [b,L] True means ignoring
-
-        # self.self_attn = self_attn
-        # self.slf_attn_mask = slf_attn_mask
-        # self.mask2 = self_attn#mask2*0
-
-        self.self_attn = self_attn.detach().cpu()
-
-        return x
-
-
-class Predictor(nn.Module):
-    """ Prediction of next event type. """
-
-    def __init__(self, dim, num_types):
-        super().__init__()
-
-        self.linear1 = nn.Linear(dim, 16, bias=True)
-        self.linear2 = nn.Linear(16, 16, bias=True)
-        self.linear3 = nn.Linear(16, num_types, bias=True)
-
-        self.relu = nn.ReLU()
-        # self.do = nn.Dropout(0.2)
-        self.do = nn.Dropout(0.0)
-        nn.init.xavier_normal_(self.linear1.weight)
-        nn.init.xavier_normal_(self.linear2.weight)
-        nn.init.xavier_normal_(self.linear3.weight)
-
-    def forward(self, data, non_pad_mask, to_detach=0):
-
-        if to_detach:
-            data = data.detach()
-        # out = self.linear1(data* non_pad_mask)* non_pad_mask
-        out = self.relu(self.do(self.linear1(data))) * non_pad_mask
-        out = self.relu(self.do(self.linear2(out))) * non_pad_mask
-        out = ((self.linear3(out))) * non_pad_mask
-
-        # out = self.relu(out)
-
-        # out = self.linear2(out* non_pad_mask)
-        # out=nn.Dropout(0.1)(out)
-
-        # out = out * non_pad_mask
-        return out
-
-
-class CIF_sahp(nn.Module):
-    """ Prediction of next event type. """
-
-    def __init__(self, d_in, n_cifs, mod_CIF='mc'):
-        super().__init__()
-
-        self.d_in = d_in
-        self.d_in = d_in
-        self.n_cifs = n_cifs
-
-        self.n_mc_samples = 100
-        self.mod = mod_CIF
-
-        self.start_layer = nn.Sequential(
-            nn.Linear(self.d_in, self.d_in, bias=True),
-            GELU()
-        )
-
-        self.converge_layer = nn.Sequential(
-            nn.Linear(self.d_in, self.d_in, bias=True),
-            GELU()
-        )
-
-        self.decay_layer = nn.Sequential(
-            nn.Linear(self.d_in, self.d_in, bias=True), nn.Softplus(beta=10.0)
-        )
-
-        self.intensity_layer = nn.Sequential(
-            nn.Linear(self.d_in, self.n_cifs, bias=True),
-            nn.Softplus(beta=1.)
-        )
-
-        nn.init.xavier_normal_(self.intensity_layer[0].weight)
-        nn.init.xavier_normal_(self.start_layer[0].weight)
-        nn.init.xavier_normal_(self.converge_layer[0].weight)
-        nn.init.xavier_normal_(self.decay_layer[0].weight)
-
-    def state_decay(self, converge_point, start_point, omega, duration_t):
-        # * element-wise product
-        cell_t = torch.tanh(converge_point + (start_point -
-                            converge_point) * torch.exp(- omega * duration_t))
-
-        # cell_t = nn.Softplus()(converge_point + (start_point - converge_point) * torch.exp(- omega * duration_t))
-
-        # cell_t = (converge_point + (staxrt_point - converge_point) * torch.exp(- omega * duration_t))
-
-        return cell_t
-
-    def forward(self, embed_info, seq_times, seq_types, non_pad_mask):
-
-        # event_ll, non_event_ll = opt.event_loss(model, enc_out, event_time, event_type, side = prediction, mod=opt.mod)
-        self.n_mc_samples = 100
-
-        n_batch = seq_times.size(0)
-        n_times = seq_times.size(1) - 1  # L-1
-        device = seq_times.device
-
-        # embed_event = side[-4] # [B,L,d_model]
-        # embed_state = side[-2] # [B,L,d_r]
-        # embed_event = embed_info[:,:,:self.d_TE] # [B,L,d_model]
-        embed_event = embed_info  # [B,L,d_model]
-
-        # embed_state = embed_info[:,:,self.d_TE:] # [B,L,d_r]
-        # state_times = side[-1] # [B,P]
-        # embed_state = side[-3] # [B,P,d_r]
-
-        # non_pad_mask = get_non_pad_mask(seq_types).squeeze(2)
-
-        if self.mod == 'single':
-            # seq_onehot_types=torch.ones_like(seq_times).unsqueeze(-1) # [B,L,1]
-            seq_onehot_types = (seq_times > 0).long().unsqueeze(-1)  # [B,L,1]
-
-        elif self.mod == 'ml':
-
-            # if len(seq_types.shape)==3:
-            # seq_onehot_types = nn.functional.one_hot(seq_types.sum(-1).bool().long(), num_classes=self.n_cifs+1)[:,:,1:].type(torch.float)    # [B,L,num_classes]
-            seq_onehot_types = seq_types
-        elif self.mod == 'mc':
-            seq_onehot_types = nn.functional.one_hot(
-                seq_types, num_classes=self.n_cifs+1)[:, :, 1:].type(torch.float)
-
-        # seq_onehot_types = nn.functional.one_hot(seq_types, num_classes=self.num_types+1)[:,:,1:].type(torch.float)
-
-        dt_seq = (seq_times[:, 1:] - seq_times[:, :-1]) * \
-            non_pad_mask[:, 1:]  # [B,L-1]
-
-        # self.start_point = self.start_layer(embed_event) # [B,L,d_in]
-        # self.converge_point = self.converge_layer(embed_event) # [B,L,d_in]
-        # self.omega = self.decay_layer(embed_event) # [B,L,d_in]
-
-        # # log of intensity
-        # cell_t = self.state_decay(self.converge_point[:,1:,:], self.start_point[:,1:,:], self.omega[:,1:,:], dt_seq[:, :, None]) # [B,L-1,d_in]
-
-        self.start_point = self.start_layer(
-            embed_event)[:, :-1, :] * non_pad_mask[:, 1:, None]  # [B,L-1,d_in]  1:L-1
-        self.converge_point = self.converge_layer(
-            embed_event)[:, :-1, :] * non_pad_mask[:, 1:, None]  # [B,L-1,d_in]
-        self.omega = self.decay_layer(
-            embed_event)[:, :-1, :] * non_pad_mask[:, 1:, None]  # [B,L-1,d_in]
-        # log of intensity
-        cell_t = self.state_decay(
-            self.converge_point, self.start_point, self.omega, dt_seq[:, :, None])  # [B,L-1,d_in]
-
-        # Get the intensity process
-        # intens_at_evs = self.intensity_layer(torch.cat([cell_t,cell_t_state],dim=-1)) # [B,L-1,n_cif]
-        # + self.intensity_layer_state(cell_t_state) # [B,L-1,n_cif] 2:L
-        intens_at_evs = self.intensity_layer(cell_t)
-        self.intens_at_evs = intens_at_evs
-
-        # [B,L-1,n_cif] intensity at occurred types
-        true_intens_at_evs = intens_at_evs * seq_onehot_types[:, 1:, :]
-        intens_at_evs_sumK = torch.sum(true_intens_at_evs, dim=-1)  # [B,L-1]
-        intens_at_evs_sumK.masked_fill_(~non_pad_mask[:, 1:].bool(), 1.0)
-
-        log_sum = torch.sum(torch.log(intens_at_evs_sumK), dim=-1)  # [B]
-        # integral
-        taus = torch.rand(n_batch, n_times, 1, self.n_mc_samples).to(
-            device)  # self.process_dim replaced 1  [B,L-1,1,ns]
-        taus = dt_seq[:, :, None, None] * taus  # inter-event times samples)
-
-        # sampled_times = taus + seq_times[:, :-1,None, None]
-
-        # cell_tau = self.state_decay(
-        #     self.converge_point[:,1:,:,None],
-        #     self.start_point[:,1:,:,None],
-        #     self.omega[:,1:,:,None],
-        #     taus) # [B,L-1,d_model,ns]
-
-        # cell_tau = self.state_decay(
-        #     self.converge_point[:,:,:,None] * non_pad_mask[:, 1:,None,None],
-        #     self.start_point[:,:,:,None] * non_pad_mask[:, 1:,None,None],
-        #     self.omega[:,:,:,None] * non_pad_mask[:, 1:,None,None],
-        #     taus) # [B,L-1,d_model,ns]
-
-        cell_tau = self.state_decay(
-            self.converge_point[:, :, :, None],
-            self.start_point[:, :, :, None],
-            self.omega[:, :, :, None],
-            taus)  # [B,L-1,d_model,ns]
-
-        cell_tau = cell_tau.transpose(2, 3)  # [B,L-1,ns,d_model]
-
-        # intens_at_samples = self.intensity_layer(torch.cat([cell_tau,cell_tau_state],dim=-1)).transpose(2,3) # [B,L-1,K,ns]
-        intens_at_samples = self.intensity_layer(
-            cell_tau).transpose(2, 3)  # +\
-        #                          self.intensity_layer_state(cell_tau_state).transpose(2,3)# [B,L-1,K,ns]
-
-        intens_at_samples = intens_at_samples * \
-            non_pad_mask[:, 1:, None, None]  # [B,L-1,n_cif,ns]
-        total_intens_samples = intens_at_samples.sum(
-            dim=2)  # shape batch * N * MC  [B,L-1,ns]
-        partial_integrals = dt_seq * \
-            total_intens_samples.mean(dim=2)  # [B,L-1]
-
-        integral_ = partial_integrals.sum(dim=1)  # [B]
-
-        # ****************************************************** MULTI-LABEL case:
-
-        # intens_at_evs_sumK = torch.sum(true_intens_at_evs, dim=-1) # [B,L-1]
-        # intens_at_evs_sumK.masked_fill_(~non_pad_mask[:, 1:].bool(), 1.0)
-
-        if self.mod == 'ml':
-            aaa = 1
-            p = intens_at_evs * \
-                torch.exp(-aaa*partial_integrals[:, :, None]) * \
-                non_pad_mask[:, 1:, None]  # [B,L-1,n_cif]
-            if p.max() > 0.999:
-                p = torch.clamp(p, max=0.99)
-                print("WTF")
-                a = 1
-            one_min_true_log_density = (
-                1-seq_onehot_types[:, 1:, :])*torch.log(1-p) * non_pad_mask[:, 1:, None]  # [B,L-1,n_cif]
-            log_sum = log_sum + one_min_true_log_density.sum(-1).sum(-1)  # [B]
-            if torch.isinf(one_min_true_log_density.sum()):
-                print("WTF")
-                a = 1
-
-        self.intens_at_samples = intens_at_samples
-        self.taus = taus
-
-        self.true_intens_at_evs = true_intens_at_evs
-
-        # res = torch.sum(- log_sum + integral_)
-        return log_sum, integral_
-
-
-class CIF_sahp2(nn.Module):
-    """ Prediction of next event type. """
-
-    def __init__(self, d_in, n_cifs, mod_CIF='mc'):
-        super().__init__()
-
-        self.d_in = d_in
-        self.d_in = d_in
-        self.n_cifs = n_cifs
-
-        self.n_mc_samples = 20
-        self.mod = mod_CIF
-
-        self.start_layer = nn.Sequential(
-            nn.Linear(self.d_in, self.d_in, bias=True),
-            GELU()
-        )
-
-        self.converge_layer = nn.Sequential(
-            nn.Linear(self.d_in, self.d_in, bias=True),
-            GELU()
-        )
-
-        self.decay_layer = nn.Sequential(
-            nn.Linear(self.d_in, self.d_in, bias=True), nn.Softplus(beta=10.0)
-        )
-
-        self.intensity_layer = nn.Sequential(
-            nn.Linear(self.d_in, self.n_cifs, bias=True),
-            nn.Softplus(beta=1.)
-        )
-
-    def state_decay(self, converge_point, start_point, omega, duration_t):
-        # * element-wise product
-        cell_t = torch.tanh(converge_point + (start_point -
-                            converge_point) * torch.exp(- omega * duration_t))
-        # cell_t = (converge_point + (start_point - converge_point) * torch.exp(- omega * duration_t))
-
-        return cell_t
-
-    def forward(self, embed_info, seq_times, seq_types, non_pad_mask):
-
-        # event_ll, non_event_ll = opt.event_loss(model, enc_out, event_time, event_type, side = prediction, mod=opt.mod)
-
-        n_batch = seq_times.size(0)
-        n_times = seq_times.size(1) - 1  # L-1
-        device = seq_times.device
-
-        # embed_event = side[-4] # [B,L,d_model]
-        # embed_state = side[-2] # [B,L,d_r]
-        # embed_event = embed_info[:,:,:self.d_TE] # [B,L,d_model]
-        embed_event = embed_info  # [B,L,d_model]
-
-        # embed_state = embed_info[:,:,self.d_TE:] # [B,L,d_r]
-        # state_times = side[-1] # [B,P]
-        # embed_state = side[-3] # [B,P,d_r]
-
-        # non_pad_mask = get_non_pad_mask(seq_types).squeeze(2)
-
-        if self.mod == 'single':
-            seq_onehot_types = torch.ones_like(
-                seq_times).unsqueeze(-1)  # [B,L,1]
-        elif self.mod == 'ml':
-
-            # if len(seq_types.shape)==3:
-            seq_onehot_types = nn.functional.one_hot(seq_types.sum(-1).bool().long(
-            ), num_classes=self.n_cifs+1)[:, :, 1:].type(torch.float)    # [B,L,num_classes]
-
-        elif self.mod == 'mc':
-            seq_onehot_types = nn.functional.one_hot(
-                seq_types, num_classes=self.n_cifs+1)[:, :, 1:].type(torch.float)
-
-        # seq_onehot_types = nn.functional.one_hot(seq_types, num_classes=self.num_types+1)[:,:,1:].type(torch.float)
-
-        self.start_point = self.start_layer(embed_event)  # [B,L,d_in]
-        self.converge_point = self.converge_layer(embed_event)  # [B,L,d_in]
-        self.omega = self.decay_layer(embed_event)  # [B,L,d_in]
-
-        # log of intensity
-        dt_seq = (seq_times[:, 1:] - seq_times[:, :-1]) * \
-            non_pad_mask[:, 1:]  # [B,L-1]
-        cell_t = self.state_decay(
-            self.converge_point[:, 1:, :], self.start_point[:, 1:, :], self.omega[:, 1:, :], dt_seq[:, :, None])  # [B,L-1,d_in]
-
-        # Get the intensity process
-        # intens_at_evs = self.intensity_layer(torch.cat([cell_t,cell_t_state],dim=-1)) # [B,L-1,n_cif]
-        # + self.intensity_layer_state(cell_t_state) # [B,L-1,n_cif]
-        intens_at_evs = self.intensity_layer(cell_t)
-
-        # [B,L-1,n_cif] intensity at occurred types
-        true_intens_at_evs = intens_at_evs * seq_onehot_types[:, 1:, :]
-        intens_at_evs_sumK = torch.sum(true_intens_at_evs, dim=-1)  # [B,L-1]
-        intens_at_evs_sumK.masked_fill_(~non_pad_mask[:, 1:].bool(), 1.0)
-
-        log_sum = torch.sum(torch.log(intens_at_evs_sumK), dim=-1)  # [B]
-
-        # integral
-        taus = torch.rand(n_batch, n_times, 1, self.n_mc_samples).to(
-            device)  # self.process_dim replaced 1  [B,L-1,1,ns]
-        taus = dt_seq[:, :, None, None] * taus  # inter-event times samples)
-
-        # sampled_times = taus + seq_times[:, :-1,None, None]
-
-        cell_tau = self.state_decay(
-            self.converge_point[:, 1:, :, None],
-            self.start_point[:, 1:, :, None],
-            self.omega[:, 1:, :, None],
-            taus)  # [B,L-1,d_model,ns]
-        cell_tau = cell_tau.transpose(2, 3)  # [B,L-1,ns,d_model]
-
-        # intens_at_samples = self.intensity_layer(torch.cat([cell_tau,cell_tau_state],dim=-1)).transpose(2,3) # [B,L-1,K,ns]
-        intens_at_samples = self.intensity_layer(
-            cell_tau).transpose(2, 3)  # +\
-        #                          self.intensity_layer_state(cell_tau_state).transpose(2,3)# [B,L-1,K,ns]
-
-        intens_at_samples = intens_at_samples * \
-            non_pad_mask[:, 1:, None, None]  # [B,L-1,n_cif,ns]
-        total_intens_samples = intens_at_samples.sum(
-            dim=2)  # shape batch * N * MC  [B,L-1,ns]
-        partial_integrals = dt_seq * \
-            total_intens_samples.mean(dim=2)  # [B,L-1]
-
-        integral_ = partial_integrals.sum(dim=1)  # [B]
-
-        # ****************************************************** MULTI-LABEL case:
-        if self.mod == 'ml':
-
-            p = intens_at_evs * \
-                torch.exp(-partial_integrals[:, :, None]) * \
-                non_pad_mask[:, 1:, None]  # [B,L-1,n_cif]
-            if p.max() > 0.999:
-                print("WTF")
-                a = 1
-            one_min_true_log_density = (
-                1-seq_types[:, 1:, :])*torch.log(1-p) * non_pad_mask[:, 1:, None]  # [B,L-1,n_cif]
-            log_sum = log_sum + one_min_true_log_density.sum(-1).sum(-1)  # [B]
-            if torch.isinf(one_min_true_log_density.sum()):
-                print("WTF")
-                a = 1
-
-            # log_density = log_intensity - intensity_integral.sum(-1).unsqueeze(-1)
-
-        # res = torch.sum(- log_sum + integral_)
-        return log_sum, integral_
-
-
-class CIF_thp(nn.Module):
-    """ Prediction of next event type. """
-
-    def __init__(self, d_in, n_cifs, mod_CIF='MHP_multilabel'):
-        super().__init__()
-
-        self.d_in = d_in
-        self.d_in = d_in
-        self.n_cifs = n_cifs
-
-        self.n_mc_samples = 20
-        self.mod == mod_CIF
-
-        # THP decoder
-        # parameter for the weight of time difference
-        self.alpha = nn.Parameter(torch.ones(self.d_CIF) * (-0.1))
-
-        # parameter for baseline b_k
-        self.base = nn.Parameter(torch.ones(self.d_CIF) * (0.1))
-
-        # parameter for the softplus function
-        self.beta = nn.Parameter(torch.ones(self.d_CIF) * (1.0))
-
-        # state-dependent base intensity
-        if self.state:
-            self.base_R = nn.Linear(self.d_DA, self.d_CIF, bias=False)
-
-        # convert hidden vectors into a scalar
-        # if self.state:
-        self.linear = nn.Linear(self.d_con, self.d_CIF)
-
-    def forward(self, embed_info, seq_times, seq_types, non_pad_mask):
-
-        # event_ll, non_event_ll = opt.event_loss(model, enc_out, event_time, event_type, side = prediction, mod=opt.mod)
-
-        n_batch = seq_times.size(0)
-        n_times = seq_times.size(1) - 1  # L-1
-        device = seq_times.device
-
-        non_pad_mask = get_non_pad_mask(seq_types).squeeze(2)
-        dt_seq = (seq_times[:, 1:] - seq_times[:, :-1]) * \
-            non_pad_mask[:, 1:]  # [B,L-1]
-
-        if len(seq_types.shape) == 3:
-            # seq_onehot_types = nn.functional.one_hot(seq_types.sum(-1).bool().long(), num_classes=self.num_types+1)[:,:,1:].type(torch.float)    # [B,L,num_classes]
-            seq_onehot_types = seq_types
-        else:
-            seq_onehot_types = nn.functional.one_hot(
-                seq_types, num_classes=self.num_types+1)[:, :, 1:].type(torch.float)
-
-        # lambda at timestamps
-        all_hid = self.linear(embed_info)  # [B,L,K]
-        intens_at_evs = Utils.softplus(
-            self.alpha[None, None, :]*dt_seq[:, :, None] + all_hid[:, 1:, :]+self.base[None, None, :], self.beta)  # [B,L-1,K]
-
-        # [B,L-1,K] intensity at occurred types
-        true_intens_at_evs = intens_at_evs * seq_onehot_types[:, 1:, :]
-        intens_at_evs_sumK = torch.sum(true_intens_at_evs, dim=-1)  # [B,L-1]
-        intens_at_evs_sumK.masked_fill_(~non_pad_mask[:, 1:].bool(), 1.0)
-
-        log_sum = torch.sum(torch.log(intens_at_evs_sumK), dim=-1)  # [B]
-
-        # integral
-
-        taus = torch.rand(n_batch, n_times, 1, self.n_mc_samples).to(
-            device)  # self.process_dim replaced 1  [B,L-1,1,ns]
-        taus = dt_seq[:, :, None, None] * taus  # inter-event times samples)
-
-        intens_at_samples = Utils.softplus(self.alpha[None, None, :, None]*taus+all_hid[:, 1:, :,
-                                           None]+self.base[None, None, :, None], self.beta[None, None, :, None])  # [B,L-1,K,ns]
-        intens_at_samples = intens_at_samples * \
-            non_pad_mask[:, 1:, None, None]  # [B,L-1,K,ns]
-        total_intens_samples = intens_at_samples.sum(
-            dim=2)  # shape batch * N * MC  [B,L-1,ns]
-        partial_integrals = dt_seq * \
-            total_intens_samples.mean(dim=2)  # [B,L-1]
-
-        integral_ = partial_integrals.sum(dim=1)  # [B]
-
-        # ****************************************************** MULTI-LABEL case:
-        if self.mod == 'MHP_multilabel':
-
-            p = intens_at_evs * \
-                torch.exp(-partial_integrals[:, :, None]) * \
-                non_pad_mask[:, 1:, None]  # [B,L-1,K]
-            if p.max() > 0.999:
-                a = 1
-            one_min_true_log_density = (
-                1-seq_types[:, 1:, :])*torch.log(1-p) * non_pad_mask[:, 1:, None]  # [B,L-1,K]
-            log_sum = log_sum + one_min_true_log_density.sum(-1).sum(-1)  # [B]
-            if torch.isinf(one_min_true_log_density.sum()):
-                a = 1
-
-        # res = torch.sum(- log_sum + integral_)
-        return log_sum, integral_
-
-
-class RNN_layers(nn.Module):
-    """
-    Optional recurrent layers. This is inspired by the fact that adding
-    recurrent layers on top of the Transformer helps language modeling.
-    """
-
-    def __init__(self, d_mark, d_rnn):
-        super().__init__()
-
-        self.rnn = nn.LSTM(d_mark, d_rnn, num_layers=1, batch_first=True)
-        self.projection = nn.Linear(d_rnn, d_mark)
-
-    def forward(self, data, non_pad_mask):
-        lengths = non_pad_mask.squeeze(2).long().sum(1).cpu()
-        pack_enc_output = nn.utils.rnn.pack_padded_sequence(
-            data, lengths, batch_first=True, enforce_sorted=False)
-        temp = self.rnn(pack_enc_output)[0]
-        out = nn.utils.rnn.pad_packed_sequence(temp, batch_first=True)[0]
-
-        out = self.projection(out)
-        return out
-
-
-class Transformer(nn.Module):
-    """ A sequence to sequence model with attention mechanism. """
-
-    def __init__(
-            self,
-            num_types, d_mark=256, d_rnn=128, d_inner=1024,
-            n_layers=4, n_head=4, d_k=64, d_v=64, dropout=0.1,
-            reg=False,
-            global_structure=None
-    ):
-        super().__init__()
-
-        self.encoder = Encoder(
-            num_types=num_types,
-            d_mark=d_mark,
-            d_inner=d_inner,
-            n_layers=n_layers,
-            n_head=n_head,
-            d_k=d_k,
-            d_v=d_v,
-            dropout=dropout,
-        )
-
-        self.num_types = num_types
-
-        # convert hidden vectors into a scalar
-        self.linear = nn.Linear(d_mark, num_types)
-
-        # parameter for the weight of time difference
-        self.alpha = nn.Parameter(torch.tensor(-0.1))
-
-        # parameter for the softplus function
-        self.beta = nn.Parameter(torch.tensor(1.0))
-
-        # OPTIONAL recurrent layer, this sometimes helps
-        self.rnn = RNN_layers(d_mark, d_rnn)
-
-        # prediction of next time stamp
-        self.time_predictor = Predictor(d_mark, 1)
-
-        # prediction of next event type
-        self.type_predictor = Predictor(d_mark, num_types)
-
-        # parameter for the weight of time difference
-        self.alpha = nn.Parameter(torch.ones(num_types) * (-0.1))
-
-        # parameter for the softplus function
-        self.beta = nn.Parameter(torch.ones(num_types) * (1.0))
-        self.base = nn.Parameter(torch.ones(num_types) * (0.1))
-        self.multi_labels = False
-
-        self.reg = reg
-
-        # self.A_reg = nn.Parameter(torch.ones(self.num_types, self.num_types))
-
-        if self.reg:
-            temp = torch.rand(self.num_types, self.num_types) + \
-                torch.eye(num_types)
-            self.A_reg = nn.Parameter(temp)
-        else:
-            self.A_reg = nn.Parameter(
-                torch.ones(self.num_types, self.num_types))
-            # self.A_reg = nn.Parameter(torch.eye(self.num_types, self.num_types))
-
-            # list_temp = [[1., 0., 0., 0., 0., 1., 0., 0., 1., 0.],
-            #             [0., 1., 0., 0., 0., 0., 1., 0., 1., 0.],
-            #             [0., 0., 1., 1., 0., 0., 0., 0., 0., 0.],
-            #             [0., 0., 0., 1., 0., 1., 0., 0., 0., 0.],
-            #             [1., 1., 0., 0., 1., 0., 0., 0., 0., 0.],
-            #             [0., 0., 0., 0., 0., 1., 1., 1., 0., 0.],
-            #             [0., 0., 1., 0., 0., 0., 1., 0., 0., 0.],
-            #             [0., 0., 0., 0., 1., 0., 0., 1., 0., 0.],
-            #             [0., 0., 1., 0., 1., 1., 0., 1., 1., 0.],
-            #             [0., 0., 0., 0., 0., 0., 0., 0., 0., 1.]]
-            # temp = torch.tensor(list_temp)
-            # self.A_reg = nn.Parameter(temp)
-
-            self.A_reg.requires_grad = False
-
-        # self.global_structure = global_structure
-        # if global_structure is None:
-        #     self.global_structure = torch.ones(self.num_types, self.num_types)
-
-    def forward(self, event_type, event_time):
-        """
-        Return the hidden representations and predictions.
-        For a sequence (l_1, l_2, ..., l_N), we predict (l_2, ..., l_N, l_{N+1}).
-        Input: event_type: batch*seq_len;
-               event_time: batch*seq_len.
-        Output: enc_output: batch*seq_len*model_dim;
-                type_prediction: batch*seq_len*num_classes (not normalized);
-                time_prediction: batch*seq_len.
-        """
-        non_pad_mask = get_non_pad_mask(
-            event_type)  # [B,L,1] 0 for padded elements
-
-        # [B,L,d_mark] <- [B,L], [B,L], [B,L,1]
-        enc_output = self.encoder(
-            event_type, event_time, non_pad_mask, self.A_reg)
-        # enc_output = self.rnn(enc_output, non_pad_mask)
-
-        # self.A_reg = self.global_structure * self.A_reg
-
-        # [B,L,1] <- [B,L,d_mark]
-        time_prediction = self.time_predictor(enc_output, non_pad_mask)
-
-        # [B,L,C] <- [B,L,d_mark]
-        type_prediction = self.type_predictor(enc_output, non_pad_mask)
-
-        return enc_output, (type_prediction, time_prediction, self.A_reg)
-
-
-def cumulative_segment_wrapper(fun):
-    """Wrap a cumulative function such that it can be applied to segments.
-
-    Args:
-        fun: The cumulative function
-
-    Returns:
-        Wrapped function.
-
-    """
-    def wrapped_segment_op(x, segment_ids, **kwargs):
-        with torch.compat.v1.name_scope(
-                None, default_name=fun.__name__+'_segment_wrapper', values=[x]):
-            segments, _ = torch.unique(segment_ids)
-            n_segments = torch.shape(segments)[0]
-            output_array = torch.TensorArray(
-                x.dtype, size=n_segments, infer_shape=False)
-
-            def loop_cond(i, out):
-                return i < n_segments
-
-            def execute_cumulative_op_on_segment(i, out):
-                segment_indices = torch.where(
-                    torch.equal(segment_ids, segments[i]))
-                seg_begin = torch.reduce_min(segment_indices)
-                seg_end = torch.reduce_max(segment_indices)
-                segment_data = x[seg_begin:seg_end+1]
-                out = out.write(i, fun(segment_data, **kwargs))
-                return i+1, out
-
-            i_end, filled_array = torch.while_loop(
-                loop_cond,
-                execute_cumulative_op_on_segment,
-                loop_vars=(torch.constant(0), output_array),
-                parallel_iterations=10,
-                swap_memory=True
-            )
-            output_tensor = filled_array.concat()
-            output_tensor.set_shape(x.get_shape())
-            return output_tensor
-
-    return wrapped_segment_op
-
-
-def cumulative_mean(tensor):
-    """Cumulative mean of a rank 2 tensor.
-
-    Args:
-        tensor: Input tensor
-
-    Returns:
-        Tensor with same shape as input but containing cumulative mean.
-
-    """
-    assert len(tensor.shape) == 2
-    n_elements = torch.cast(torch.shape(tensor)[0], tensor.dtype)
-    start = torch.constant(1, dtype=tensor.dtype)
-    n_elements_summed = torch.range(start, n_elements+1, dtype=tensor.dtype)
-    return torch.cumsum(tensor, axis=0) / torch.expand_dims(n_elements_summed, -1)
 
 
 def softmax_weighting(values, preattention, mask, eps=1e-7, online=True):
@@ -1051,124 +217,216 @@ def cumulative_softmax_weighting(values, preattention, mask, eps=1e-7, online=Tr
     # )
     return out5, att
 
+def align(r_enc, event_time, state_time):
+    """
+    event_time [B,L]
+    state_time [B,P]
+    r_enc [B,P, d]
+    """
 
-class CumulativeSetAttentionLayer(nn.Module):
-    # dense_options = {
-    #     'activation': 'relu',
-    #     'kernel_initializer': 'he_uniform'
-    # }
-    def __init__(self,
-                 dim_s,
-                 n_layers=2, d_psi=128, d_rho=128,
-                 aggregation_function='mean',
-                 dot_prod_dim=64, n_heads=4, attn_dropout=0.3):
+    diff = event_time.unsqueeze(-1) - state_time.unsqueeze(-2)  # [B,L,P]
+    diff[diff <= 0] = 1e9
+    # indices = torch.argmax(diff,-1).flatten()-1 # [B*L]
+    indices = torch.argmax(diff, -1)-1  # [B,L]
+    indices[indices < 0] = 0
+
+    # indices_1hot = F.one_hot(indices,num_classes=r_enc.shape[1]).float() # [B,L,P]
+    # # [B,L,d,1,1] = [B,L,1,1,P] @ [B,1,d,P,1]
+    # r_enc_red = torch.matmul(indices_1hot[:,:,None,None,:]   ,   r_enc.transpose(1,2)[:,None,:,:,None])
+    # r_enc_red = r_enc_red.squeeze(-1).squeeze(-1)  # [B,L,d]
+
+    # r_enc_red2 = torch.zeros(*event_time.shape, r_enc.shape[-1],device=r_enc.device) # [B,L,d]
+    # for i,x in enumerate(indices):
+    #     r_enc_red2[i]=r_enc[i,indices[i],:]
+
+    r_enc_red = torch.gather(
+        r_enc, 1, indices.unsqueeze(-1).repeat(1, 1, r_enc.shape[-1]))
+
+    # this was wrong
+    # r_enc_red = torch.index_select(r_enc.reshape(-1, r_enc.shape[-1]), 0, indices.flatten()).reshape(*event_time.shape,-1) # [B,L, d]
+
+    # example
+    # print(event_time[1][:5])
+    # print(state_time[1][:55])
+    # print(r_enc[1,:55])
+    # print(r_enc_red[1,:5])
+    # print(indices[1,:5])
+    # print(r_enc[1,indices[1,:5]])
+
+    # diff[0][:5,:5]
+    # torch.argmax(diff,-1)[0,:5]-1
+
+    # r_enc.sum(-1)
+
+    return r_enc_red  # [B,L,d]
+
+
+class TEE(nn.Module):
+    """ A Transformer Event Encoder (TEE) model with self attention mechanism. """
+
+    def __init__(
+            self,
+            n_marks,
+            d_type_emb,
+
+            time_enc,
+            d_time,
+
+            d_inner,
+            n_layers,
+            n_head,
+            d_k,
+            d_v,
+            dropout,
+
+            device,
+
+            diag_offset,
+            # reg=False,
+
+
+    ):
         super().__init__()
-        assert aggregation_function == 'mean'
-        self.d_psi = d_psi
-        self.d_rho = d_rho
-        self.dim_s = dim_s
 
-        self.dot_prod_dim = dot_prod_dim
-        self.attn_dropout = attn_dropout
-        self.n_heads = n_heads
-        # self.psi = MLP_state(
-        #     n_layers, d_psi, 0., self.dense_options)
+        self.diag_offset = diag_offset
+        self.n_marks = n_marks
+        self.d_type_emb = d_type_emb
 
-        self.psi = MLP_state(dim_s, d_psi, n_layers, 0)
-        # self.psi.add(Dense(d_rho, **self.dense_options))
+        self.time_enc = time_enc
+        self.d_time = d_time  # will be set to 0 later if 'sum'
 
-        # self.rho = Dense(d_rho, **self.dense_options)
-        self.rho = nn.Linear(d_psi, d_rho)
+        self.d_inner = d_inner
+        self.n_layers = n_layers
+        self.n_head = n_head
+        self.d_k = d_k
+        self.d_v = d_v
+        self.dropout = dropout
 
-        # self.cumulative_segment_mean = cumulative_segment_wrapper(cumulative_mean)
+        # position vector, used for temporal encoding
+        if self.time_enc == 'sum':
+            self.position_vec = torch.tensor(
+                [math.pow(10000.0, 2.0 * (i // 2) / (self.d_type_emb))
+                 for i in range(self.d_type_emb)],
+                device=device)
+            self.d_time = 0
 
-        self.W_k = nn.Parameter(torch.rand(
-            [self.d_rho+self.dim_s, self.dot_prod_dim*self.n_heads]))
-        self.W_q = nn.Parameter(torch.rand([self.n_heads, self.dot_prod_dim]))
+        elif self.time_enc == 'concat':
 
-        nn.init.xavier_normal_(self.W_k)
-        nn.init.xavier_normal_(self.W_q)
-        nn.init.xavier_normal_(self.rho.weight)
+            self.position_vec = torch.tensor(
+                [math.pow(10000.0, 2.0 * (i // 2) / (self.d_time))
+                 for i in range(self.d_time)],
 
-    # def build(self, input_shape):
-    #     self.psi.build(input_shape)
-    #     encoded_shape = self.psi.compute_output_shape(input_shape)
-    #     self.rho.build(encoded_shape)
-    #     self.W_k = self.add_weight(
-    #         'W_k',
-    #         (encoded_shape[-1] + input_shape[-1], self.dot_prod_dim*self.n_heads),
-    #         initializer='he_uniform'
-    #     )
-    #     self.W_q = self.add_weight(
-    #         'W_q', (self.n_heads, self.dot_prod_dim),
-    #         initializer=tf.keras.initializers.Zeros()
-    #     )
+                device=device)
+        elif self.time_enc == 'none':
+            self.d_time = 0
 
-    # def compute_output_shape(self, input_shape):
-    #     return (input_shape[0], self.n_heads)
+        self.event_emb = nn.Linear(n_marks, d_type_emb, bias=True)
+        # nn.init.xavier_uniform_(self.event_emb.weight)
 
-    def forward(self, inputs, mask, training=None):
-        # if training is None:
-        #     training = tf.keras.backend.learning_phase()
+        self.d_model = self.d_type_emb + self.d_time
 
-        encoded = self.psi(inputs, mask)  # [B,P, d_psi]
+        # if self.reg:
+        #     self.A_reg = torch.nn.Parameter(torch.ones(num_types, num_types))
 
-        # cumulative mean aggregation
-        # agg = self.cumulative_segment_mean(encoded, segment_ids)
+        # TE_layer = nn.TransformerEncoderLayer(self.d_model, n_head, dim_feedforward=d_inner, dropout=dropout, layer_norm_eps=1e-05, batch_first=True, norm_first=False, device=None, dtype=None)
 
-        # implement cummean
-        # across P dimension [B,P, d_psi]
-        agg = (torch.cumsum(encoded, dim=1) /
-               torch.cumsum(torch.ones_like(encoded), dim=1))*mask
-        agg = self.rho(agg) * mask  # [B,P, d_rho] latent_width
+        # self.layer_stack = nn.ModuleList([
+        #     TE_layer
+        #     for _ in range(n_layers)])
 
-        # matrix A [B, P, d_s+d_rho]
-        combined = torch.concat([inputs, agg], axis=-1)
+        self.layer_stack = nn.ModuleList([
+            EncoderLayer(self.d_model, d_inner, n_head, d_k, d_v,
+                         dropout=dropout, normalize_before=False)
+            for _ in range(n_layers)])
 
-        keys = torch.matmul(combined, self.W_k) * mask  # [B, P,dot_prod_dim*m]
-        # [B, P,m, dot_prod_dim]
-        keys = torch.stack(torch.split(keys, self.n_heads, -1), -1)
-        keys = keys.unsqueeze(3)  # torch.expand_dims(keys, axis=2)
-        # should have shape (B,P, heads, 1, dot_prod_dim)
+        # self.layer_stack = nn.ModuleList([nn.TransformerEncoderLayer(self.d_model, n_head, dim_feedforward=d_inner, dropout=dropout, activation=nn.ReLU(), batch_first=True, norm_first=False, device=None, dtype=None)
+        #                                   for _ in range(n_layers)])
 
-        # queries = torch.expand_dims(torch.expand_dims(self.W_q, -1), 0)
-        queries = self.W_q.unsqueeze(0).unsqueeze(0).unsqueeze(-1)
-        # should have shape (1, 1, heads, dot_prod_dim, 1)
+    def temporal_enc(self, time, non_pad_mask):
+        """
+        Input: batch*seq_len.
+        Output: batch*seq_len*d_mark.
+        """
 
-        preattn = torch.matmul(
-            keys, queries) / torch.sqrt(torch.tensor(self.dot_prod_dim))  # [B, P,m, 1,1]
-        preattn = torch.squeeze(torch.squeeze(preattn, -1), -1)  # [B, P,m]
-        # [P, heads]
+        # temp = torch.ones_like(time) * torch.arange(time.shape[1],device=time.device) # [B,L] * [L]=[B,L]
+        # result = temp.unsqueeze(-1) / self.position_vec
 
-        return preattn * mask  # [B, P,m]
+        result = time.unsqueeze(-1) / self.position_vec
 
+        result[:, :, 0::2] = torch.sin(result[:, :, 0::2])
+        result[:, :, 1::2] = torch.cos(result[:, :, 1::2])
+        return result * non_pad_mask
 
-class MLP_state(nn.Module):
-    """ Prediction of next event type. """
+    def forward(self, event_type, event_time, non_pad_mask):
+        """ Encode event sequences via masked self-attention. """
 
-    def __init__(self, d_in, d_out, n_layers, dropout):
-        super(MLP_state, self).__init__()
+        # prepare attention masks
+        # slf_attn_mask is where we cannot look, i.e., the future and the padding
+        slf_attn_mask_subseq = get_subsequent_mask(
+            event_type, self.diag_offset)
+        slf_attn_mask_keypad = get_attn_key_pad_mask(
+            seq_k=event_type, seq_q=event_type)
+        slf_attn_mask_keypad = slf_attn_mask_keypad.type_as(
+            slf_attn_mask_subseq)
+        # [B,L,L] True are masked
+        slf_attn_mask = (slf_attn_mask_keypad + slf_attn_mask_subseq).gt(0)
 
-        # self.module = nn.Sequential([
+        # if len(event_type.shape)==3:
+        #     # E_oh = nn.functional.one_hot(event_type.sum(-1).bool().long(), num_classes=self.num_types+1)[:,:,1:].type(torch.float)    # [B,L,num_classes]
+        #     E_oh = event_type
+        # else:
+        #     E_oh = nn.functional.one_hot(event_type, num_classes=self.num_types+1)[:,:,1:].type(torch.float)
 
-        self.fc1 = nn.Linear(d_in, d_out)
-        self.relu = nn.ReLU()
-        self.do = nn.Dropout(0.0)
-        self.fc2 = nn.Linear(d_out, d_out)
+        # [B,L,L] <- [B,L,num_classes] * [num_classes,num_classes] * [B,num_classes,L]
+        # mask2 = torch.matmul( torch.matmul(E_oh,A_reg) , E_oh.transpose(1,2))   # 1 INDICATES a connection
+        # # mask2 = mask2 * (1 - torch.triu(mask2, diagonal=1))
+        # mask2 = (torch.triu(mask2, diagonal=1))
 
-        # ])
-        # self.linear = nn.Linear(dim, num_types, bias=False)
-        nn.init.xavier_normal_(self.fc1.weight)
-        nn.init.xavier_normal_(self.fc2.weight)
+        # slf_attn_mask = slf_attn_mask #+ (mask2) # [B,L,L] True are masked (do not attend)
 
-    def forward(self, data, non_pad_mask):
-        # data # [B,P, d_in]
-        # non_pad_mask [B,P,1]
-        out = self.relu(self.fc1(data * non_pad_mask))  # [B,P, d_out]
-        out = self.do(out)
-        out = self.relu(self.fc2(out * non_pad_mask))  # [B,P, d_out]
-        out = out * non_pad_mask
-        return out
+        # ### Event type embedding
+        if len(event_type.shape) == 3:
+            # E_oh = nn.functional.one_hot(event_type.sum(-1).bool().long(), num_classes=self.num_types+1)[:,:,1:].type(torch.float)    # [B,L,num_classes]
+            event_type_1hot = event_type.type(torch.float)
+        else:
+            event_type_1hot = nn.functional.one_hot(
+                event_type, num_classes=self.n_marks+1)[:, :, 1:].type(torch.float)
+
+        x = self.event_emb(event_type_1hot)
+
+        # ### Event time encoding
+        time_enc = self.temporal_enc(
+            event_time, non_pad_mask)  # [B, L, d_model]
+
+        # ### combining
+        if self.time_enc == 'sum':
+            x += time_enc  # [B,L,d_model]
+        elif self.time_enc == 'concat':
+            x = torch.cat((x, time_enc), -1)  # [B,L,d_model]
+        elif self.time_enc == 'none':
+            pass
+
+        for enc_layer in self.layer_stack:
+            # x += tem_enc
+
+            x, self_attn = enc_layer(
+                x,
+                non_pad_mask=non_pad_mask,
+                slf_attn_mask=slf_attn_mask)
+
+            # x = enc_layer(
+            #     x,
+            #     # [L,L] True means: do not attend
+            #     src_mask=slf_attn_mask_subseq[0].bool(),
+            #     src_key_padding_mask=(~non_pad_mask.bool()).squeeze(-1))  # [b,L] True means ignoring
+
+        # self.self_attn = self_attn
+        # self.slf_attn_mask = slf_attn_mask
+        # self.mask2 = self_attn#mask2*0
+
+        self.self_attn = self_attn.detach().cpu()
+
+        return x
 
 
 class DeepAttensionModule(nn.Module):
@@ -1393,60 +651,7 @@ class DeepAttensionModule(nn.Module):
         return output  # * non_pad_mask
 
 
-def align(r_enc, event_time, state_time):
-    """
-    event_time [B,L]
-    state_time [B,P]
-    r_enc [B,P, d]
-    """
-
-    diff = event_time.unsqueeze(-1) - state_time.unsqueeze(-2)  # [B,L,P]
-    diff[diff <= 0] = 1e9
-    # indices = torch.argmax(diff,-1).flatten()-1 # [B*L]
-    indices = torch.argmax(diff, -1)-1  # [B,L]
-    indices[indices < 0] = 0
-
-    # indices_1hot = F.one_hot(indices,num_classes=r_enc.shape[1]).float() # [B,L,P]
-    # # [B,L,d,1,1] = [B,L,1,1,P] @ [B,1,d,P,1]
-    # r_enc_red = torch.matmul(indices_1hot[:,:,None,None,:]   ,   r_enc.transpose(1,2)[:,None,:,:,None])
-    # r_enc_red = r_enc_red.squeeze(-1).squeeze(-1)  # [B,L,d]
-
-    # r_enc_red2 = torch.zeros(*event_time.shape, r_enc.shape[-1],device=r_enc.device) # [B,L,d]
-    # for i,x in enumerate(indices):
-    #     r_enc_red2[i]=r_enc[i,indices[i],:]
-
-    r_enc_red = torch.gather(
-        r_enc, 1, indices.unsqueeze(-1).repeat(1, 1, r_enc.shape[-1]))
-
-    # this was wrong
-    # r_enc_red = torch.index_select(r_enc.reshape(-1, r_enc.shape[-1]), 0, indices.flatten()).reshape(*event_time.shape,-1) # [B,L, d]
-
-    # example
-    # print(event_time[1][:5])
-    # print(state_time[1][:55])
-    # print(r_enc[1,:55])
-    # print(r_enc_red[1,:5])
-    # print(indices[1,:5])
-    # print(r_enc[1,indices[1,:5]])
-
-    # diff[0][:5,:5]
-    # torch.argmax(diff,-1)[0,:5]-1
-
-    # r_enc.sum(-1)
-
-    return r_enc_red  # [B,L,d]
-
-
-class GELU(nn.Module):
-    """
-    Paper Section 3.4, last paragraph notice that BERT used the GELU instead of RELU
-    """
-
-    def forward(self, x):
-        return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
-
-
-class ATHP(nn.Module):
+class TEEDAM(nn.Module):
     """ A sequence to sequence model with attention mechanism. """
 
     def __init__(
@@ -1466,32 +671,9 @@ class ATHP(nn.Module):
             demo_config=False,
             device=torch.device('cpu'),
             diag_offset=1
-            # num_types, te_d_mark=16,te_d_time=8, te_d_rnn=128, te_d_inner=1024,
-            # te_n_layers=4, te_n_head=4, te_d_k=64, te_d_v=64, te_dropout=0.1,
-            # reg=False,
-            # global_structure=None,
-
-            # mark_detach = 0,
-            # event_enc=1,
-            # state = True,
-            # d_state = 4,
-            # num_states=4,
-
-            # mod = 'multiclass',
-            # num_marks=1,
-            # sample_label = False
     ):
         super().__init__()
 
-        # self.type_embed=0
-        # self.time_encod=0
-        # self.TE=0
-        # self.DAM=0
-
-        # self.event_decoder=0
-        # self.pred_next_type=0
-        # self.pred_next_time=0
-        # self.pred_label=0
 
         self.d_out_te = 0
         self.d_out_dam = 0
@@ -1509,17 +691,9 @@ class ATHP(nn.Module):
 
         self.temp = {}
 
-        # self.sample_label = sample_label
-
-        # self.num_types = num_types
-        # self.state = state
-        # self.event_enc = event_enc
-        # self.mark_detach = mark_detach
-        # self.reg = reg
-        # self.te_d_mark = te_d_mark
         # TRANSFORMER ENCODER ************************************************************
         if TE_config:
-            self.TE = Encoder(
+            self.TE = TEE(
                 # num_types = TE_config['num_types'],
 
                 n_marks=TE_config['n_marks'],
@@ -1543,11 +717,6 @@ class ATHP(nn.Module):
             )
 
             self.d_out_te = self.TE.d_model
-        #     self.d_TE = self.encoder.d_mark+self.encoder.d_time
-
-        # else:
-        #     self.d_TE = 0
-        # self.A_reg = nn.Parameter(torch.ones(self.num_types, self.num_types))
 
         # DeepAttensionModule ************************************************************
         self.d_DA = 0

@@ -1,12 +1,18 @@
 
 
-# [TimEHR: Image-based Time Series Generation for Electronic Health Records](https://arxiv.org/abs/2402.06318)
+# [TEE4EHR: Transformer Event Encoder for Better Representation Learning in Electronic Health Records](https://arxiv.org/abs/2402.06367)
 
 [![](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Y-debug-sys/Diffusion-TS/blob/main/LICENSE) 
 <img src="https://img.shields.io/badge/python-3.9.7-blue">
 <img src="https://img.shields.io/badge/pytorch-2.2.2-orange">
 
-> **Abstract:** Time series in Electronic Health Records (EHRs) present unique challenges for generative models, such as irregular sampling, missing values, and high dimensionality. In this paper, we propose a novel generative adversarial network (GAN) model, **TimEHR**, to generate time series data from EHRs. In particular, TimEHR treats time series as images and is based on two conditional GANs. The first GAN generates missingness patterns, and the second GAN generates time series values based on the missingness pattern. Experimental results on three real-world EHR datasets show that TimEHR outperforms state-of-the-art methods in terms of fidelity, utility, and privacy metrics.
+> **Abstract:** Irregular sampling of time series in electronic health records (EHRs) is one of the main challenges for developing machine learning models. Additionally, the pattern of missing data in certain clinical variables is not at random but depends on the decisions of clinicians and the state of the patient. Point process is a mathematical framework for analyzing event sequence data that is consistent with irregular sampling patterns. Our model, *TEE4EHR*, is a transformer event encoder (TEE) with point process loss that encodes the pattern of laboratory tests in EHRs. The utility of our TEE has been investigated in a variety of benchmark event sequence datasets. Additionally, we conduct experiments on two real-world EHR databases to provide a more comprehensive evaluation of our model. Firstly, in a self-supervised learning approach, the TEE is jointly learned with an existing attention-based deep neural network which gives superior performance in negative log-likelihood and future event prediction. Besides, we propose an algorithm for aggregating attention weights that can reveal the interaction between the events. Secondly, we transfer and freeze the learned TEE to the downstream task for the outcome prediction, where it outperforms state-of-the-art models for handling irregularly sampled time series. Furthermore, our results demonstrate that our approach can improve representation learning in EHRs and can be useful for clinical prediction tasks.
+
+<p align="center">
+  <img src="figures/arch.png" alt="" height=200>
+  <br>
+  Architecture of TEE4EHR.
+</p>
 
 ## Contents
 - [Installation](#installation)
@@ -22,8 +28,8 @@ git clone https://github.com/hojjatkarami/TimEHR.git
 cd TimEHR
 
 # using virtualenv
-python3 -m venv test2
-source "/mlodata1/hokarami/Machine-Learning-Collection/ML/Pytorch/GANs/4. WGAN-GP/test2/bin/activate"
+python3 -m venv test
+source "test/bin/activate"
 
 # using conda
 conda create --name TimEHR python=3.9.7 --yes
@@ -38,100 +44,61 @@ pip install -r requirements.txt
 We used three real-world EHRs datasets as well as simulated data in our experiments:
 
 
-| Dataset Name | Size | Number of Features |
+| Dataset Name | Size | Number of Events |
 |--------------|------|--------------------|
-| [PhysioNet/Computing in Cardiology Challenge 2012](https://physionet.org/content/challenge-2012/1.0.0/) | 12k | 35 |
-| [PhysioNet/Computing in Cardiology Challenge 2019](https://physionet.org/content/challenge-2019/1.0.0/) | 38k | 32 |
-| [MIMIC-III](https://physionet.org/content/mimiciii/1.4/) | 51k | 37 |
-| Simulated Data | 10k | 16,32,64,128 |
+| [Stack Overflow (Multi-Class)](https://drive.google.com/drive/folders/1KIzJsiBlcH7k1hdGDxeW1Sg3dmzSERKH?usp=drive_link) | 6.6k | 22 |
+| [Retweets (Multi-Class)](https://drive.google.com/drive/folders/0BwqmV0EcoUc8MVRvUEgtVmRaZ1U?resourcekey=0-86_dKFm2POj0hCqb8FVnpw&usp=drive_link) | 20k | 3 |
+| [Retweets (Multi-Label)*](https://github.com/babylonhealth/neuralTPPs) | 24k | 3 |
+| [Synthea (Multi-Label)*](https://github.com/babylonhealth/neuralTPPs) | 12k | 357 |
+| [PhysioNet/Computing in Cardiology Challenge 2012 (P12)*](https://physionet.org/content/challenge-2012/1.0.0/) | 12k | 24 |
+| [PhysioNet/Computing in Cardiology Challenge 2019 (P19)*](https://physionet.org/content/challenge-2019/1.0.0/) | 38k | 25 |
 
-We need to convert **irregularly-sampled time series** to images. Please refer to the [data](data) folder for more details on the datasets.
+We converted the datasets (*) to the common format introduced by [Neural Hawkes Process](https://github.com/hongyuanmei/neurawkes). For P12 and P19 datasets, we used the same splits as in [RainDrop]()https://github.com/mims-harvard/Raindrop/tree/main. You can download the converted datasets from [here](https://drive.google.com/drive/folders/1F92AZ2ct6Yzi5fpI0i6YpWJs-CdufG7j)
 
-<p align="center">
-  <img src="figures/git-data.png" alt="" height=200>
-  <br>
-  Converting time series to images.
-</p>
+If you want to use your own dataset, you need to convert it to the common format. You can do so by inspecting one of the datasets.
+
 
 ## Quick Start
-
-We use `hydra-core` library for managing all configuration parameters. You can change them from `configs/config.yaml`. 
 
 We highly recommend using `wandb` for logging and tracking the experiments. Get your API key from [wandb](https://wandb.ai/authorize). Create a `.env` file in the root directory and add the following line:
 
 ```bash
 WANDB_API_KEY=your_api_key
 ```
-### Training
 
-
-<p align="center">
-  <img src="figures/git-train.png" alt=""  height=200>
-  <br>
-  Training Procedure.
-</p>
-
-The following command will train the model and generate synthetic time series for `P12-split0` (You should have prepared the data in the `data` folder before running):
-```bash
-python train.py
-```
-This will train TimEHR modules (CWGAN-GP and Pix2Pix) for the default configuration (P12 dataset, split0) and prints the generated dataframe. Modules are saved locally in `Results/{dataset}-s{split}/[CWGAN|Pix2Pix]/` folder as well as on wandb servers (`account_name/[CWGAN|PIXGAN]`).
-
-### Evaluation
-<p align="center">
-  <img src="figures/git-eval.png" alt="" height=200>
-  <br>
-  Evaluation Procedure.
-</p>
+First, you need to convert your irregularly-sampled time series data into a desired format. Then, run the following command to train the model:
 
 ```bash
-python eval.py Results/p12-s0
+python Main.py  -data /mlodata1/hokarami/tedam/p12/ -setting raindrop -split 0 -demo -data_label multilabel -wandb -wandb_project TEEDAM_supervised -event_enc 1 -state -mod ml -next_mark 1 -mark_detach 1 -sample_label 1 -user_prefix [H70--TEDA__pp_ml-concat] -time_enc concat -wandb_tag RD75
+
 ```
 
-This will generate and evaluate synthetic time series for the trained models in the `Results/p12-s0` folder and save the results in a wandb project `TimEHR-Eval` as well as locally in the `Results/p12-s0/TimEHR-Eval` folder.
+The results will be logged in the `wandb` dashboard under `TEEDAM_supervised` project.
 
-For a more in-depth tutorial on how to train, generate, evaluate, and visualize the synthetic data, please checkout our notebook [Tutorial.ipynb](Tutorial.ipynb).
+
 
 # Replication of the results in the paper
 
-To replicate the results in the paper, please follow the steps below:
+To replicate the results in the paper (Tables 2-5), please run the following scripts:
 
-1. Run the following commands: 
-    ```bash
-    python train.py -m data=p12 split=0,1,2,3,4
-    python train.py -m data=mimic split=0,1,2,3,4
-    python train.py -m data=p19 split=0,1,2,3,4 pix2pix.lambda_l1=100
 
-    ```
-2. Use `python eval.py Results/{dataset}-s{split}` for the evaluation. The results will be saved in wanbd dashboard (`account_name/TimEHR-Eval`).
+```bash
+bash scripts/preliminary/{DATA}.sh # Tables 2, 3
+bash scripts/EHRs/Unsupervised/{DATA}.sh # Table 4
+bash scripts/EHRs/Supervised/{DATA}.sh # Table 5
+```
 
 
 
 ## Citation
 If you find this repo useful, please cite our paper via
 ```bibtex
-@article{karami2024timehr,
-  title={TimEHR: Image-based Time Series Generation for Electronic Health Records},
-  author={Karami, Hojjat and Hartley, Mary-Anne and Atienza, David and Ionescu, Anisoara},
-  journal={arXiv preprint arXiv:2402.06318},
+@article{karami2024tee4ehr,
+  title={TEE4EHR: Transformer Event Encoder for Better Representation Learning in Electronic Health Records},
+  author={Karami, Hojjat and Atienza, David and Ionescu, Anisoara},
+  journal={arXiv preprint arXiv:2402.06367},
   year={2024}
 }
 ```
 
 
-
-
-```bash
-curl https://pyenv.run | bash
-
-
-export PATH="$HOME/.pyenv/bin:$PATH"
-eval "$(pyenv init --path)"
-eval "$(pyenv virtualenv-init -)"
-
-pyenv install 3.9.7
-pyenv global 3.9.7
-python --version
-
-
-```

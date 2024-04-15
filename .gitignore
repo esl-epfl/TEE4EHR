@@ -5,6 +5,7 @@ __pycache__/
 .idea/
 
 wandb/
+wandb
 .vscode
 
 # "distilbert-base-uncased-finetuned-imdb/"

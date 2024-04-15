@@ -3,12 +3,7 @@ import torch
 import torch.utils.data
 
 from transformer import Constants
-
-def hk_onehot(x,num_types):
-    # x is a list
-    one = np.zeros(num_types, dtype=int)
-    one[x]=1
-    return one
+from torch.utils.data import WeightedRandomSampler
 
 
 
@@ -94,127 +89,6 @@ class TEDA(torch.utils.data.Dataset):
 
 
 
-
-
-
-class EventData(torch.utils.data.Dataset):
-    """ Event stream dataset. """
-
-    def __init__(self, data, dim='MHP', data_label='multiclass', num_types=22):
-        """
-        Data should be a list of event streams; each event stream is a list of dictionaries;
-        each dictionary contains: time_since_start, time_since_last_event, type_event
-        """
-        self.time = [[elem['time_since_start'] for elem in inst] for inst in data]
-        self.time_gap = [[elem['time_since_last_event'] for elem in inst] for inst in data]
-        # plus 1 since there could be event type 0, but we use 0 as padding
-        # self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data]
-        
-        if isinstance(data[0][0]['type_event'],np.ndarray):
-            self.event_type = [[elem['type_event'] + 0 for elem in inst] for inst in data]
-        else:
-            self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data]
-            # self.event_type = [  [      hk_onehot(elem['type_event'], num_types )  for elem in inst]    for inst in data]
-
-
-        # if data_label=='multiclass':
-            
-        # if mod=='SHP_marked':
-        #     # self.event_type = [[ 1 for elem in inst] for inst in data]
-        #     self.event_type = [[elem['type_event'] + 0 for elem in inst] for inst in data]
-        # elif mod=='MHP_multiclass':
-        #     self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data]    
-            
-                
-        # elif mod=='MHP_multilabel':
-        #     self.event_type = [[elem['type_event'] + 0 for elem in inst] for inst in data]
-
-        # if mod=='multiclass':
-        #     self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data]
-        # elif mod=='marked':
-        #     self.event_type = [[elem['type_mark']  for elem in inst] for inst in data]
-        self.length = len(data)
-
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, idx):
-        """ Each returned element is a list, which represents an event stream """
-        return self.time[idx], self.time_gap[idx], self.event_type[idx]
-
-class EventData2(torch.utils.data.Dataset):
-    """ Event stream dataset. """
-
-    def __init__(self, data_event, data_state, dim='MHP', data_label='multiclass'):
-        """
-        Data should be a list of event streams; each event stream is a list of dictionaries;
-        each dictionary contains: time_since_start, time_since_last_event, type_event
-        """
-        self.time = [[elem['time_since_start'] for elem in inst] for inst in data_event]
-        self.time_gap = [[elem['time_since_last_event'] for elem in inst] for inst in data_event]
-        # plus 1 since there could be event type 0, but we use 0 as padding
-        
-
-        if isinstance(data_event[0][0]['type_event'],np.ndarray):
-            self.event_type = [[elem['type_event'] + 0 for elem in inst] for inst in data_event]
-        else:
-            self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data_event]
-
-
-
-        # if dim=='SHP':            
-        #     if mod=='multiclass':
-        #         self.event_type = [[ 1 for elem in inst] for inst in data_event]
-        #     elif mod=='marked':
-        #         self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data_event]  
-        # else:
-        #     self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data_event]
-        # if mod=='SHP_marked':
-        #     # self.event_type = [[ 1 for elem in inst] for inst in data]
-        #     self.event_type = [[elem['type_event'] + 0 for elem in inst] for inst in data_event]
-        # elif mod=='MHP_multiclass':
-        #     self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data_event]    
-            
-                
-        # elif mod=='MHP_multilabel':
-        #     self.event_type = [[elem['type_event'] + 0 for elem in inst] for inst in data_event]
-        # elif mod=='None':
-        #     self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data_event]
-        
-        # if mod=='multiclass':
-        #     self.event_type = [[elem['type_event'] + 1 for elem in inst] for inst in data_event]
-        # elif mod=='multilabel':
-        #     self.event_type = [[elem['mark_event'] for elem in inst] for inst in data_event]
-        # elif mod=='marked':
-        #     self.event_type = [[elem['mark_event']+1 for elem in inst] for inst in data_event]
-
-        self.length = len(data_event)
-
-        self.time_state = [[elem['abs_time'] for elem in inst] for inst in data_state]
-        self.value = [[elem['value'] for elem in inst] for inst in data_state]
-        self.mod = [[elem['mod']+1 for elem in inst] for inst in data_state]        
-        self.label = [[elem['label'] for elem in inst] for inst in data_state]
-        self.whole_label = [(sum([elem['label'] for elem in inst])>0)+0 for inst in data_state]
-
-        
-
-
-
-
-
-        a=1
-
-    def __len__(self):
-        return self.length
-    def sample_label(self):
-        return self.whole_label
-    def __getitem__(self, idx):
-        """ Each returned element is a list, which represents an event stream """
-        # print('get')
-        return self.time[idx], self.time_gap[idx], self.event_type[idx], self.time_state[idx], self.value[idx], self.mod[idx], self.label[idx]
-
-
-
 def pad_time(insts):
     """ Pad the instance to the max seq length in batch. """
 
@@ -223,10 +97,6 @@ def pad_time(insts):
         inst + [Constants.PAD] * (max_len - len(inst))
         for inst in insts])
 
-    # max_len2 = 1000
-    # batch_seq = np.array([
-    #     (  inst + [Constants.PAD] * (max_len2 - len(inst))  ) [:max_len2]
-    #     for inst in insts])
 
     return torch.tensor(batch_seq, dtype=torch.float32)
 
@@ -252,25 +122,12 @@ def pad_type(insts):
             inst + [Constants.PAD] * (max_len - len(inst))
             for inst in insts])
 
-    # max_len2 = 1000
-    # batch_seq = np.array([
-    #     (  inst + [Constants.PAD] * (max_len2 - len(inst))  ) [:max_len2]
-    #     for inst in insts])
 
     return torch.tensor(batch_seq, dtype=torch.long)
 
 
-def collate_fn(insts):
-    """ Collate function, as required by PyTorch. """
-    
-    time, time_gap, event_type = list(zip(*insts))
-    time = pad_time(time)
-    time_gap = pad_time(time_gap)
-    event_type = pad_type(event_type)
-    
-    return time, time_gap, event_type
 
-def collate_fn2(insts):
+def collate_fn(insts):
     """ Collate function, as required by PyTorch. """
     
     # time, time_gap, event_type, time_state, value, mod, label = list(zip(*insts))
@@ -308,67 +165,9 @@ def collate_fn2(insts):
 
     return out
 
-def get_dataloader(data, batch_size, shuffle=True, data_label='multiclass', balanced=False):
-    """ Prepare dataloader. """
-
-    ds = EventData(data,data_label=data_label)
-    dl = torch.utils.data.DataLoader(
-        ds,
-        num_workers=0,
-        batch_size=batch_size,
-        collate_fn=collate_fn,
-        shuffle=shuffle,
-        drop_last=True
-    )
-
-    
-    return dl
-
-from torch.utils.data import WeightedRandomSampler
-def get_dataloader2(data_event, data_state, batch_size, shuffle=True, dim='MHP', data_label='multiclass', balanced=False):
-    """ Prepare dataloader. """
-
-    ds = EventData2(data_event, data_state,dim=dim, data_label=data_label)
-    sample_labels = ds.sample_label()
-    pos_count = sum(sample_labels)
-    neg_count = len(sample_labels) - sum(sample_labels)
-    class_counts = [neg_count, pos_count]
-    sample_weights = [1/class_counts[i] for i in sample_labels]
-    sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(ds), replacement=True)
-
-    print(f'[info] True/total = {pos_count/(pos_count+neg_count) :.4f}')
-
-    if balanced:
-        
-        
-        print(f'[info] balanced mini batches')
-
-        dl = torch.utils.data.DataLoader(
-            ds,
-            num_workers=0,
-            batch_size=batch_size,
-            collate_fn=collate_fn2,
-            # shuffle=shuffle,
-            drop_last=True,
-            sampler=sampler,
-        )
-
-    else:
-        dl = torch.utils.data.DataLoader(
-            ds,
-            num_workers=0,
-            batch_size=batch_size,
-            collate_fn=collate_fn2,
-            shuffle=shuffle,
-            drop_last=True,
-            # sampler=sampler,
-        )
 
 
-    return dl
-
-
-def get_dataloader3(data_event, data_state=None, bs=4, shuffle=True, dim='MHP', data_label='multiclass', balanced=False, state_args=None):
+def get_dataloader(data_event, data_state=None, bs=4, shuffle=True, dim='MHP', data_label='multiclass', balanced=False, state_args=None):
     """ Prepare dataloader. """
 
     ds = TEDA(data_event, data_state,dim=dim, data_label=data_label,**state_args)
@@ -391,7 +190,7 @@ def get_dataloader3(data_event, data_state=None, bs=4, shuffle=True, dim='MHP', 
             ds,
             num_workers=0,
             batch_size=bs,
-            collate_fn=collate_fn2,
+            collate_fn=collate_fn,
             # shuffle=shuffle,
             drop_last=True,
             sampler=sampler,
@@ -403,7 +202,7 @@ def get_dataloader3(data_event, data_state=None, bs=4, shuffle=True, dim='MHP', 
             ds,
             num_workers=0,
             batch_size=bs,
-            collate_fn=collate_fn2,
+            collate_fn=collate_fn,
             shuffle=shuffle,
             drop_last=True,
             # sampler=sampler,
@@ -415,55 +214,3 @@ def get_dataloader3(data_event, data_state=None, bs=4, shuffle=True, dim='MHP', 
     return dl
 
 
-
-
-class EventData_state(torch.utils.data.Dataset):
-    """ Event stream dataset. """
-
-    def __init__(self, data):
-        """
-        Data should be a list of event streams; each event stream is a list of dictionaries;
-        each dictionary contains: time_since_start, time_since_last_event, type_event
-        """
-        self.time = [[elem['time_since_start'] for elem in inst] for inst in data]
-        # self.time_gap = [[elem['time_since_last_event'] for elem in inst] for inst in data]
-        # plus 1 since there could be event type 0, but we use 0 as padding
-        self.mod = [[elem['mod'] + 1 for elem in inst] for inst in data]
-        self.value = [[elem['value'] + 1 for elem in inst] for inst in data]
-
-        self.length = len(data)
-
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, idx):
-        """ Each returned element is a list, which represents an event stream """
-        return self.time[idx], self.value[idx], self.mod[idx]
-
-
-
-def collate_fn_state(insts):
-    """ Collate function, as required by PyTorch. """
-    
-    time, value, mod = list(zip(*insts))
-    
-    time = pad_time(time)
-    # time_gap = pad_time(time_gap)
-    value = pad_type(value)
-    mod = pad_type(mod)
-
-    return time, value, mod
-
-
-def get_dataloader_state(data, batch_size, shuffle=True):
-    """ Prepare dataloader. """
-
-    ds = EventData_state(data)
-    dl = torch.utils.data.DataLoader(
-        ds,
-        num_workers=0,
-        batch_size=batch_size,
-        collate_fn=collate_fn,
-        shuffle=shuffle
-    )
-    return dl
