@@ -53,7 +53,7 @@ We used three real-world EHRs datasets as well as simulated data in our experime
 | [PhysioNet/Computing in Cardiology Challenge 2012 (P12)*](https://physionet.org/content/challenge-2012/1.0.0/) | 12k | 24 |
 | [PhysioNet/Computing in Cardiology Challenge 2019 (P19)*](https://physionet.org/content/challenge-2019/1.0.0/) | 38k | 25 |
 
-We converted the datasets (*) to the common format introduced by [Neural Hawkes Process](https://github.com/hongyuanmei/neurawkes). For P12 and P19 datasets, we used the same splits as in [RainDrop]()https://github.com/mims-harvard/Raindrop/tree/main. You can download the converted datasets from [here](https://drive.google.com/drive/folders/1F92AZ2ct6Yzi5fpI0i6YpWJs-CdufG7j)
+We converted the datasets (*) to the common format introduced by [Neural Hawkes Process](https://github.com/hongyuanmei/neurawkes). For P12 and P19 datasets, we used the same splits as in [RainDrop](https://github.com/mims-harvard/Raindrop/tree/main). You can download the converted datasets from [here](https://drive.google.com/drive/folders/1F92AZ2ct6Yzi5fpI0i6YpWJs-CdufG7j)
 
 If you want to use your own dataset, you need to convert it to the common format. You can do so by inspecting one of the datasets.
 
