@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformer.Constants as Constants
+import math
 
 import Utils
 
@@ -244,10 +245,12 @@ class CIF_sahp(nn.Module):
             p = intens_at_evs * \
                 torch.exp(-aaa*partial_integrals[:, :, None]) * \
                 non_pad_mask[:, 1:, None]  # [B,L-1,n_cif]
-            if p.max() > 0.999:
+
+
+            if torch.max(p) > 0.999:
                 p = torch.clamp(p, max=0.99)
-                print("WTF")
-                a = 1
+
+            
             one_min_true_log_density = (
                 1-seq_onehot_types[:, 1:, :])*torch.log(1-p) * non_pad_mask[:, 1:, None]  # [B,L-1,n_cif]
             log_sum = log_sum + one_min_true_log_density.sum(-1).sum(-1)  # [B]

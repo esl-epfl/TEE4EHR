@@ -426,7 +426,8 @@ def valid_epoch(model, validation_data, pred_loss_func, opt):
                 non_pad_mask[:, 1:].flatten().bool().detach().cpu())  # [*, C]
 
             # CIF decoder
-            if hasattr(model, 'event_decoder'):
+            if hasattr(model, 'event_decoder') and enc_out.shape[1]>1:
+
                 log_sum, integral_ = model.event_decoder(
                     enc_out, event_time, event_type, non_pad_mask)
 
