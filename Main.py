@@ -848,8 +848,7 @@ def options():
     parser.add_argument('-split', type=str, default='',
                         help='split number')
 
-    # logging args
-    # parser.add_argument('-pos_alpha', type=float, default=1.0)
+    
 
     # General Config
     parser.add_argument('-epoch', type=int, default=40)
@@ -1137,12 +1136,12 @@ def config(opt, justLoad=False):
     if opt.w_pos:
 
         opt.pos_weight = torch.tensor(opt.pos_weight, device=opt.device)
-        opt.pos_weight = opt.pos_weight*opt.pos_alpha
+        opt.pos_weight = opt.pos_weight
         print('[Info] pos weigths:\n', opt.pos_weight)
 
     else:
         opt.pos_weight = torch.ones(
-            opt.num_marks, device=opt.device)*opt.pos_alpha
+            opt.num_marks, device=opt.device)
 
     if opt.w_class:
 
@@ -1410,7 +1409,7 @@ def main():
     )
     model.to(opt.device)
 
-    if opt.transfer_learning != '':
+    if opt.transfer_learning:
 
         # transfer learning
         api = wandb.Api()
