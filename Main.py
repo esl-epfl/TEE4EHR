@@ -1380,7 +1380,7 @@ def main():
         # wandb.tensorboard.patch(root_logdir=opt.run_path, pytorch=True)
         # sync_tensorboard=True,
         wandb.init(config=opt, project=opt.wandb_project,
-                    entity="hokarami", name=opt.run_name, tags=[opt.wandb_tag],)
+                    name=opt.run_name, tags=[opt.wandb_tag],)
         # wandb.config.update(opt.TE_config)
         # wandb.config.update(opt.DAMconfig)
         # opt.wandb_dir = wandb.run.dir
@@ -1414,7 +1414,7 @@ def main():
 
         # transfer learning
         api = wandb.Api()
-        runs = api.runs("hokarami/TEEDAM_unsupervised")
+        runs = api.runs("TEEDAM_unsupervised")
         df_filt = dl_runs(runs, selected_tag=opt.tl_tag)
 
         df_config = pd.DataFrame(
